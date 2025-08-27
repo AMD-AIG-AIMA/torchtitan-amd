@@ -13,6 +13,8 @@ from torch import nn
 
 from torchtitan.distributed.expert_parallel import expert_parallel
 
+from torchtitan.tools.utils import is_hip
+import primus_turbo.pytorch as turbo
 
 @dataclass
 class MoEArgs:
@@ -124,6 +126,34 @@ def _run_experts_grouped_mm(
     return out
 
 
+@expert_parallel
+def _run_experts_grouped_mm_rocm(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    assert x.dim() == 2
+
+    num_tokens_per_expert = num_tokens_per_expert.to(torch.int64)
+
+    h = F.silu(
+        turbo.ops.grouped_gemm(
+            x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+        )
+    )
+    h = h * turbo.ops.grouped_gemm(
+        x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+    )
+
+    out = turbo.ops.grouped_gemm(
+        h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+    ).type_as(x)
+
+    return out
+
+
 class GroupedExperts(nn.Module):
     def __init__(
         self,
@@ -145,9 +175,14 @@ class GroupedExperts(nn.Module):
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         if self.use_grouped_mm:
-            return _run_experts_grouped_mm(
-                self.w1, self.w2, self.w3, x, num_tokens_per_expert
-            )
+            if is_hip():
+                return _run_experts_grouped_mm_rocm(
+                    self.w1, self.w2, self.w3, x, num_tokens_per_expert
+                )
+            else:
+                return _run_experts_grouped_mm(
+                    self.w1, self.w2, self.w3, x, num_tokens_per_expert
+                )
         else:
             return _run_experts_for_loop(
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert

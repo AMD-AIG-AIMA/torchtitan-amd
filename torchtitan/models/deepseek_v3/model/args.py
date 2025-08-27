@@ -15,7 +15,7 @@ from torchtitan.config import JobConfig
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import has_cuda_capability, is_hip
 
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
@@ -94,11 +94,19 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
-            logger.warning(
-                "Failed to use grouped mm, which is only supported on SM90 or later",
-            )
-            self.moe_args.use_grouped_mm = False
+        if self.moe_args.use_grouped_mm:
+            if is_hip():
+                if not has_cuda_capability(9, 4):
+                    logger.warning(
+                        "Failed to use grouped mm, which is only supported on AMD GFX94 or later.",
+                    )
+                    self.moe_args.use_grouped_mm = False
+            else:
+                if not has_cuda_capability(9, 0):
+                    logger.warning(
+                        "Failed to use grouped mm, which is only supported on NV SM90 or later.",
+                    )
+                    self.moe_args.use_grouped_mm = False
 
         if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
             raise NotImplementedError(

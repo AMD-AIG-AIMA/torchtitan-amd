@@ -11,7 +11,7 @@ enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 10
+log_freq = 1
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
@@ -49,7 +49,7 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
-expert_parallel_degree = 8
+expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
