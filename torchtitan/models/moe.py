@@ -15,6 +15,16 @@ from torchtitan.distributed.expert_parallel import expert_parallel
 
 from torchtitan.tools.utils import is_hip
 import primus_turbo.pytorch as turbo
+from primus_turbo.pytorch.core.float8 import (
+    Float8QuantConfig,
+    Format,
+    ScalingGranularity,
+)
+
+import os 
+
+
+USE_FP8_GROUPED_MM = os.environ.get("TORCHTITAN_USE_FP8_GROUPED_MM", "0") == "1"
 
 @dataclass
 class MoEArgs:
@@ -114,9 +124,9 @@ def _run_experts_grouped_mm(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     # grouped mm between a 2D tensor and a 3D tensor
     assert x.dim() == 2
-
+    
     h = F.silu(
-        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1),offs=offsets)
     )
     h = h * torch._grouped_mm(
         x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
@@ -135,21 +145,37 @@ def _run_experts_grouped_mm_rocm(
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
     assert x.dim() == 2
-
-    num_tokens_per_expert = num_tokens_per_expert.to(torch.int64)
-
-    h = F.silu(
-        turbo.ops.grouped_gemm(
-            x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+    
+    num_tokens_per_expert = num_tokens_per_expert.to(torch.long)
+    if USE_FP8_GROUPED_MM:
+        
+        config = Float8QuantConfig(format=Format.E4M3, granularity=ScalingGranularity.TENSORWISE)
+        h = F.silu(
+            turbo.ops.grouped_gemm_fp8(
+                x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True, config=config
+            )
         )
-    )
-    h = h * turbo.ops.grouped_gemm(
-        x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
-    )
-
-    out = turbo.ops.grouped_gemm(
-        h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
-    ).type_as(x)
+        h = h * turbo.ops.grouped_gemm_fp8(
+            x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True, config=config
+        )
+        
+        out = turbo.ops.grouped_gemm_fp8(
+            h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True, config=config
+        ).type_as(x)
+    else:
+        
+        h = F.silu(
+            turbo.ops.grouped_gemm(
+                x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+            )
+        )
+        h = h * turbo.ops.grouped_gemm(
+            x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+        )
+        
+        out = turbo.ops.grouped_gemm(
+            h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+        ).type_as(x)
 
     return out
 

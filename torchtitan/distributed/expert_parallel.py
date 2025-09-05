@@ -343,8 +343,9 @@ def expert_parallel(func: Callable) -> Callable:
                 num_tokens_per_expert,
                 experts_per_ep_rank,
                 num_ep_ranks,
-                x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
-                TOKEN_GROUP_ALIGN_SIZE_M,
+                x.shape[0], 1
+                #x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M,
+                #TOKEN_GROUP_ALIGN_SIZE_M,
             )
 
         x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
