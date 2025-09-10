@@ -363,7 +363,17 @@ class DeepSeekV3MoE(nn.Module):
         try:
             # Import symmetric memory components
             import torch.distributed._symmetric_memory as symm_mem
-            from torchtitan.experiments.deepseek_v3.symm_mem_recipes import OnDeviceAllToAllV
+            
+            # Try ROCm-compatible symmetric memory first
+            if is_hip():
+                try:
+                    from ..rocm_symm_mem_recipes import ROCmOnDeviceAllToAllV as OnDeviceAllToAllV
+                    logger.info("Using ROCm-compatible symmetric memory implementation")
+                except ImportError:
+                    logger.warning("ROCm symmetric memory not available, falling back to standard implementation")
+                    from torchtitan.experiments.deepseek_v3.symm_mem_recipes import OnDeviceAllToAllV
+            else:
+                from torchtitan.experiments.deepseek_v3.symm_mem_recipes import OnDeviceAllToAllV
 
             # Setup parameters
             overflow_factor = 2

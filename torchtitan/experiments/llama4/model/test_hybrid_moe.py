@@ -99,6 +99,32 @@ def test_deepseek_components():
     print("✅ All DeepSeek V3 components work correctly")
 
 
+def test_rocm_symmetric_memory():
+    """Test ROCm symmetric memory components"""
+    print("Testing ROCm symmetric memory...")
+    
+    try:
+        from ..rocm_symm_mem_recipes import (
+            ROCmOnDeviceAllToAllV, 
+            rocm_send_signal, 
+            rocm_wait_signal,
+            blockwise_barrier,
+            is_rocm_symmetric_memory_available
+        )
+        
+        print(f"✅ ROCm symmetric memory imports successful")
+        print(f"   - ROCm availability: {is_rocm_symmetric_memory_available()}")
+        
+        # Test ROCm barrier availability
+        from ..rocm_symm_mem_recipes.rocm_barrier import check_rocm_barrier_availability
+        rocm_available = check_rocm_barrier_availability()
+        print(f"   - ROCm barriers available: {rocm_available}")
+        
+    except ImportError as e:
+        print(f"⚠️ ROCm symmetric memory components not available: {e}")
+        print("   (This is expected in non-ROCm environments)")
+
+
 def test_error_handling():
     """Test error handling and fallbacks"""
     print("Testing error handling...")
@@ -134,6 +160,7 @@ def run_all_tests():
         test_config_conversion,
         test_hybrid_moe_creation,
         test_deepseek_components,
+        test_rocm_symmetric_memory,
         test_error_handling,
     ]
     
