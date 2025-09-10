@@ -42,9 +42,9 @@ import torch.distributed._symmetric_memory as symm_mem
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from attn_mask_utils import _prepare_4d_causal_attention_mask
+from .attn_mask_utils import _prepare_4d_causal_attention_mask
 
-from group_gemms import (
+from .group_gemms import (
     DSGroupGEMM,
     ManualLoopGroupGEMM,
     TorchAOBF16GroupGEMM,
@@ -53,8 +53,8 @@ from group_gemms import (
     TritonCGBF16GroupGEMM,
 )
 
-from model_config import ModelArgs
-from symm_mem_recipes import OnDeviceAllToAllV
+from .model_config import ModelArgs
+from .symm_mem_recipes import OnDeviceAllToAllV
 from torch import nn
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
