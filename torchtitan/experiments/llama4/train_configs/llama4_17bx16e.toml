@@ -39,13 +39,13 @@ dataset = "c4"
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-tensor_parallel_degree = 8
+tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 context_parallel_degree = 1
 expert_parallel_degree = 8
-enable_symmetric_memory: true 
-expert_tensor_parallel_degree = 8
+enable_symmetric_memory = true 
+expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable = false
