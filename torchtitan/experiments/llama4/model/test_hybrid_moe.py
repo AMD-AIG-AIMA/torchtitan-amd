@@ -72,7 +72,7 @@ def test_deepseek_components():
     """Test individual DeepSeek V3 components"""
     print("Testing DeepSeek V3 components...")
     
-    from .deepseek_v3_components import SimpleMLP, SimpleRouter, ROCmGroupGEMM
+    from .deepseek_v3_components import SimpleMLP, SimpleRouter, create_group_gemm_strategy
     
     # Test SimpleMLP
     mlp = SimpleMLP(hidden_size=256, intermediate_size=1024)
@@ -89,9 +89,12 @@ def test_deepseek_components():
     assert indices.dtype == torch.int32
     print("✅ SimpleRouter works")
     
-    # Test ROCmGroupGEMM
-    group_gemm = ROCmGroupGEMM()
-    print(f"✅ ROCmGroupGEMM initialized (primus available: {group_gemm.primus_available})")
+    # Test Group GEMM strategy creation
+    strategy = create_group_gemm_strategy()
+    if strategy is not None:
+        print(f"✅ Group GEMM strategy created: {type(strategy).__name__}")
+    else:
+        print("⚠️ No group GEMM strategy available (expected in test environment)")
     
     print("✅ All DeepSeek V3 components work correctly")
 

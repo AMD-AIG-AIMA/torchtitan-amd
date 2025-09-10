@@ -6,6 +6,14 @@ import torch.distributed as dist
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import is_hip
 
+# Import ROCm group GEMM strategies
+try:
+    from ..rocm_group_gemms import ROCmGroupGEMMStrategy, TorchGroupGEMMFallback
+    ROCM_GROUP_GEMM_AVAILABLE = True
+except ImportError:
+    logger.warning("ROCm group GEMM strategies not available")
+    ROCM_GROUP_GEMM_AVAILABLE = False
+
 
 def get_expert_parallel_group():
     """Get expert parallel process group"""
@@ -85,95 +93,33 @@ class SimpleRouter(nn.Module):
         return topk_indices.to(torch.int32), topk_weights.to(x.dtype)
 
 
-class ROCmGroupGEMM:
+def create_group_gemm_strategy(custom_activation=F.silu):
     """
-    ROCm-optimized grouped GEMM operations using primus_turbo.
+    Factory function to create the optimal Group GEMM strategy for the current environment.
+    
+    Args:
+        custom_activation: Activation function for SwiGLU (default: F.silu)
+        
+    Returns:
+        GroupGEMMStrategy instance
     """
-
-    def __init__(self):
-        self.primus_available = self._check_primus_availability()
-
-    def _check_primus_availability(self):
-        """Check if primus_turbo is available"""
-        if not is_hip():
-            return False
-        try:
-            import primus_turbo.pytorch as turbo
-            return True
-        except ImportError:
-            logger.warning("primus_turbo not available, falling back to torch grouped MM")
-            return False
-
-    def run_grouped_gemm(self, tokens, expert_weights, group_sizes, weight_type="gate_proj"):
-        """
-        Run grouped GEMM operations.
-        
-        Args:
-            tokens: Input tokens [total_tokens, hidden_size]
-            expert_weights: Expert weight tensors [num_experts, intermediate_size, hidden_size]
-            group_sizes: Number of tokens per expert [num_experts]
-            weight_type: Type of weights ("gate_proj", "up_proj", "down_proj")
-            
-        Returns:
-            Output tensor [total_tokens, intermediate_size or hidden_size]
-        """
-        if self.primus_available:
-            return self._run_primus_grouped_gemm(tokens, expert_weights, group_sizes)
-        else:
-            return self._run_torch_grouped_gemm(tokens, expert_weights, group_sizes)
-
-    def _run_primus_grouped_gemm(self, tokens, expert_weights, group_sizes):
-        """Use primus_turbo for ROCm"""
-        try:
-            import primus_turbo.pytorch as turbo
-            
-            group_sizes_int64 = group_sizes.to(torch.int64)
-            
-            output = turbo.ops.grouped_gemm(
-                tokens.bfloat16(),
-                expert_weights.bfloat16(),
-                group_lens=group_sizes_int64,
-                trans_b=True
-            ).type_as(tokens)
-            
-            return output
-        except Exception as e:
-            logger.warning(f"Primus grouped GEMM failed: {e}, falling back to torch")
-            return self._run_torch_grouped_gemm(tokens, expert_weights, group_sizes)
-
-    def _run_torch_grouped_gemm(self, tokens, expert_weights, group_sizes):
-        """Use PyTorch grouped matrix multiplication"""
-        try:
-            offsets = torch.cumsum(group_sizes, dim=0, dtype=torch.int32)
-            
-            output = torch._grouped_mm(
-                tokens.bfloat16(),
-                expert_weights.bfloat16().transpose(-2, -1),
-                offs=offsets
-            ).type_as(tokens)
-            
-            return output
-        except Exception as e:
-            logger.warning(f"Torch grouped GEMM failed: {e}, falling back to manual loop")
-            return self._run_manual_loop(tokens, expert_weights, group_sizes)
-
-    def _run_manual_loop(self, tokens, expert_weights, group_sizes):
-        """Manual loop fallback"""
-        outputs = []
-        offset = 0
-        
-        for i, size in enumerate(group_sizes.tolist()):
-            if size == 0:
-                continue
-            
-            expert_tokens = tokens[offset:offset+size]
-            expert_weight = expert_weights[i]
-            expert_output = F.linear(expert_tokens, expert_weight)
-            
-            outputs.append(expert_output)
-            offset += size
-        
-        return torch.cat(outputs, dim=0) if outputs else torch.zeros_like(tokens[:0])
+    if not ROCM_GROUP_GEMM_AVAILABLE:
+        logger.warning("ROCm group GEMM strategies not available, using manual fallback")
+        return None
+    
+    # Prefer ROCm strategy on AMD systems
+    if is_hip() and ROCmGroupGEMMStrategy.is_available():
+        logger.info("Using ROCm-optimized group GEMM strategy")
+        return ROCmGroupGEMMStrategy(custom_activation)
+    
+    # Fallback to PyTorch grouped GEMM
+    if TorchGroupGEMMFallback.is_available():
+        logger.info("Using PyTorch group GEMM fallback strategy")
+        return TorchGroupGEMMFallback(custom_activation)
+    
+    # No group GEMM available
+    logger.warning("No group GEMM strategies available")
+    return None
 
 
 class DeepSeekV3MoE(nn.Module):
@@ -216,8 +162,8 @@ class DeepSeekV3MoE(nn.Module):
         else:
             self.shared_experts = None
 
-        # Initialize grouped GEMM
-        self.group_gemm = ROCmGroupGEMM()
+        # Initialize grouped GEMM strategy
+        self.group_gemm_strategy = create_group_gemm_strategy(custom_activation=F.silu)
 
     def _setup_expert_parallelism(self):
         """Setup expert parallelism with single-node fallback"""
@@ -280,7 +226,102 @@ class DeepSeekV3MoE(nn.Module):
         return expert_output
 
     def _process_local(self, tokens, expert_indices, expert_weights):
-        """Process tokens through local experts"""
+        """Process tokens through local experts using optimized grouped operations when available"""
+        
+        # Try to use grouped GEMM strategy if available
+        if self.group_gemm_strategy is not None:
+            try:
+                return self._process_with_grouped_gemm(tokens, expert_indices, expert_weights)
+            except Exception as e:
+                logger.warning(f"Grouped GEMM processing failed: {e}, falling back to manual loop")
+        
+        # Fallback to manual expert loop
+        return self._process_manual_loop(tokens, expert_indices, expert_weights)
+
+    def _process_with_grouped_gemm(self, tokens, expert_indices, expert_weights):
+        """Process tokens using grouped GEMM operations"""
+        
+        # Arrange tokens and compute group sizes for each expert
+        expert_tokens_list = []
+        expert_weights_gathered = []
+        m_sizes = []
+        
+        for expert_idx in range(len(self.experts)):
+            # Find tokens assigned to this expert
+            mask = (expert_indices == expert_idx)
+            expert_token_mask = mask.any(dim=1)
+            
+            if expert_token_mask.any():
+                expert_tokens = tokens[expert_token_mask]
+                expert_tokens_list.append(expert_tokens)
+                m_sizes.append(expert_tokens.shape[0])
+                expert_weights_gathered.append(expert_weights[expert_token_mask])
+            else:
+                m_sizes.append(0)
+        
+        if not expert_tokens_list:
+            return torch.zeros_like(tokens)
+        
+        # Concatenate all tokens contiguously
+        contig_tokens = torch.cat(expert_tokens_list, dim=0)
+        m_sizes_tensor = torch.tensor(m_sizes, device=tokens.device, dtype=torch.int32)
+        
+        # Arrange expert weights for grouped operations
+        module_mock = self._create_module_mock()
+        
+        # Process using the grouped GEMM strategy
+        processed_tokens = self.group_gemm_strategy.execute(
+            contig_tokens, m_sizes_tensor, None, module_mock
+        )
+        
+        # Redistribute processed tokens back to original positions
+        output = torch.zeros_like(tokens)
+        offset = 0
+        expert_idx = 0
+        
+        for i, num_tokens in enumerate(m_sizes):
+            if num_tokens > 0:
+                expert_output = processed_tokens[offset:offset + num_tokens]
+                
+                # Find original positions for this expert
+                mask = (expert_indices == i)
+                expert_token_mask = mask.any(dim=1)
+                
+                # Apply routing weights
+                routing_weights = expert_weights_gathered[expert_idx].mean(dim=-1, keepdim=True)
+                weighted_output = expert_output * routing_weights
+                
+                output[expert_token_mask] += weighted_output
+                offset += num_tokens
+                expert_idx += 1
+        
+        return output
+
+    def _create_module_mock(self):
+        """Create a mock module with arranged expert weights for grouped GEMM"""
+        # Collect weights from all experts
+        gate_weights = []
+        up_weights = []
+        down_weights = []
+        
+        for expert in self.experts:
+            gate_weights.append(expert.gate_proj.weight)
+            up_weights.append(expert.up_proj.weight)  
+            down_weights.append(expert.down_proj.weight)
+        
+        # Arrange weights using the group GEMM strategy
+        class MockModule:
+            pass
+        
+        module = MockModule()
+        module.gate_proj_weight = self.group_gemm_strategy.arrange_expert_weights(gate_weights, "gate_proj", module)
+        module.up_proj_weight = self.group_gemm_strategy.arrange_expert_weights(up_weights, "up_proj", module)
+        module.down_proj_weight = self.group_gemm_strategy.arrange_expert_weights(down_weights, "down_proj", module)
+        
+        return module
+
+    def _process_manual_loop(self, tokens, expert_indices, expert_weights):
+        """Fallback manual loop processing"""
         output = torch.zeros_like(tokens)
 
         for expert_idx, expert in enumerate(self.experts):
@@ -290,7 +331,8 @@ class DeepSeekV3MoE(nn.Module):
                 continue
 
             # Get tokens and weights for this expert
-            expert_tokens = tokens[mask.any(dim=1)]
+            expert_token_mask = mask.any(dim=1)
+            expert_tokens = tokens[expert_token_mask]
             if expert_tokens.numel() == 0:
                 continue
 
@@ -301,7 +343,7 @@ class DeepSeekV3MoE(nn.Module):
             weights = expert_weights[mask].mean(dim=-1, keepdim=True)
             weighted_out = expert_out * weights
 
-            output[mask.any(dim=1)] += weighted_out
+            output[expert_token_mask] += weighted_out
 
         return output
 
