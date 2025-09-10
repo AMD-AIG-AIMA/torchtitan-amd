@@ -14,6 +14,7 @@ from torchtitan.models.moe import MoE
 from torchtitan.protocols import ModelProtocol
 
 from .args import TransformerModelArgs
+from .hybrid_moe import LLaMA4SymmMemMoE
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
@@ -279,6 +280,7 @@ class TransformerBlock(nn.Module):
         self,
         layer_id: int,
         model_args: TransformerModelArgs,
+        ep_enabled: bool = False,
     ):
         super().__init__()
         self.n_heads = model_args.n_heads
@@ -314,7 +316,14 @@ class TransformerBlock(nn.Module):
                 hidden_dim = int(hidden_dim / hidden_dim_denom)
             hidden_dim += -hidden_dim % model_args.multiple_of
 
-            self.moe = MoE(moe_args, dim=dim, hidden_dim=hidden_dim)
+            # Use hybrid MoE that automatically selects optimal implementation
+            self.moe = LLaMA4SymmMemMoE(
+                moe_args=moe_args,
+                dim=dim,
+                hidden_dim=hidden_dim,
+                ep_enabled=ep_enabled,
+                max_seq_len=model_args.max_seq_len,
+            )
         else:
             self.feed_forward = FeedForward(
                 dim=model_args.dim,
@@ -383,7 +392,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: TransformerModelArgs, ep_enabled: bool = False):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -397,7 +406,7 @@ class Transformer(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args, ep_enabled)
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
         self.init_weights()

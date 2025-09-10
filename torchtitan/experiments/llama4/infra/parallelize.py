@@ -34,6 +34,79 @@ from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
 
+def enable_expert_parallelism_in_model(model: nn.Module):
+    """
+    Enable expert parallelism in hybrid MoE layers post-creation.
+    
+    This function modifies existing MoE layers to enable expert parallelism
+    when the distributed setup supports it.
+    """
+    for layer_name, layer in model.layers.items():
+        if hasattr(layer, 'moe') and hasattr(layer.moe, '_should_use_distributed_moe'):
+            # The hybrid MoE will re-evaluate whether to use distributed implementation
+            # when expert parallelism environment is properly set up
+            logger.debug(f"Re-evaluating MoE implementation for layer {layer_name}")
+            # Force re-initialization if the MoE is currently using standard implementation
+            # but distributed setup is now available
+            if (layer.moe.implementation_type == "standard" and 
+                layer.moe._should_use_distributed_moe(ep_enabled=True)):
+                logger.info(f"Upgrading layer {layer_name} from standard to distributed MoE")
+                # Reinitialize with distributed MoE
+                old_moe_args = layer.moe.moe_args
+                old_dim = layer.moe.dim
+                old_hidden_dim = layer.moe.hidden_dim
+                old_max_seq_len = layer.moe.max_seq_len
+                
+                # Import here to avoid circular dependency
+                from ..model.hybrid_moe import LLaMA4SymmMemMoE
+                
+                # Create new distributed MoE
+                new_moe = LLaMA4SymmMemMoE(
+                    moe_args=old_moe_args,
+                    dim=old_dim,
+                    hidden_dim=old_hidden_dim,
+                    ep_enabled=True,
+                    max_seq_len=old_max_seq_len,
+                )
+                
+                # Replace the MoE layer
+                layer.moe = new_moe
+
+
+def setup_symmetric_memory_for_model(model: nn.Module, job_config: JobConfig):
+    """
+    Setup symmetric memory for all MoE layers in the model.
+    
+    This function configures symmetric memory buffers for distributed
+    expert processing when expert parallelism is enabled.
+    
+    Args:
+        model: The transformer model containing MoE layers
+        job_config: Configuration containing dtype and device settings
+    """
+    if not hasattr(job_config.parallelism, 'enable_symmetric_memory') or not job_config.parallelism.enable_symmetric_memory:
+        logger.debug("Symmetric memory not enabled in job config")
+        return
+    
+    dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    moe_layers_configured = 0
+    for layer_name, layer in model.layers.items():
+        if hasattr(layer, 'moe') and hasattr(layer.moe, 'setup_symmetric_memory'):
+            try:
+                logger.info(f"Setting up symmetric memory for layer {layer_name}")
+                layer.moe.setup_symmetric_memory(dtype, device)
+                moe_layers_configured += 1
+            except Exception as e:
+                logger.warning(f"Failed to setup symmetric memory for layer {layer_name}: {e}")
+    
+    if moe_layers_configured > 0:
+        logger.info(f"Configured symmetric memory for {moe_layers_configured} MoE layers")
+    else:
+        logger.info("No MoE layers found or none support symmetric memory")
+
+
 def parallelize_llama(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -66,6 +139,11 @@ def parallelize_llama(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
+
+    # Enable ep_enabled for hybrid MoE layers if expert parallelism is enabled
+    if parallel_dims.ep_enabled:
+        enable_expert_parallelism_in_model(model)
+
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
@@ -100,6 +178,10 @@ def parallelize_llama(
             ),
             etp_enabled=parallel_dims.etp_enabled,
         )
+
+    # Setup symmetric memory after model creation and parallelism but before FSDP
+    if parallel_dims.ep_enabled:
+        setup_symmetric_memory_for_model(model, job_config)
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)

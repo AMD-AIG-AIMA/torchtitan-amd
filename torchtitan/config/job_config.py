@@ -398,6 +398,15 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
+    enable_symmetric_memory: bool = False
+    """
+    Enable symmetric memory optimization for MoE expert parallelism.
+    When enabled, uses on-device symmetric memory buffers for token shuffling
+    during expert processing, eliminating CPU-GPU synchronization overhead.
+    Requires expert_parallel_degree > 1 to take effect. Automatically detects
+    ROCm/AMD environment and uses appropriate implementation.
+    """
+
 
 @dataclass
 class Checkpoint:
