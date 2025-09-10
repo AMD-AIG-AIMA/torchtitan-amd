@@ -186,6 +186,34 @@ class LLaMA4SymmMemMoE(nn.Module):
             return self.moe_impl.ep_size
         return 1
     
+    @property
+    def experts(self):
+        """Get experts from the underlying MoE implementation"""
+        if hasattr(self.moe_impl, 'experts'):
+            return self.moe_impl.experts
+        return None
+    
+    @property
+    def load_balance_coeff(self):
+        """Get load_balance_coeff from the underlying MoE implementation"""
+        if hasattr(self.moe_impl, 'load_balance_coeff'):
+            return self.moe_impl.load_balance_coeff
+        return None
+    
+    @property
+    def tokens_per_expert(self):
+        """Get tokens_per_expert from the underlying MoE implementation"""
+        if hasattr(self.moe_impl, 'tokens_per_expert'):
+            return self.moe_impl.tokens_per_expert
+        return None
+    
+    @property
+    def expert_bias(self):
+        """Get expert_bias from the underlying MoE implementation"""
+        if hasattr(self.moe_impl, 'expert_bias'):
+            return self.moe_impl.expert_bias
+        return None
+    
     def __repr__(self) -> str:
         return (
             f"LLaMA4SymmMemMoE("
