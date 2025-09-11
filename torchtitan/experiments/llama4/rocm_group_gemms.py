@@ -12,26 +12,40 @@ except ImportError:
     STANDARD_ROCM_AVAILABLE = False
 
 # Import DeepSeek V3 GroupGEMMStrategy base class
-try:
-    from torchtitan.experiments.deepseek_v3.group_gemms import GroupGEMMStrategy
-    DEEPSEEK_GROUP_GEMM_AVAILABLE = True
-except ImportError:
-    # Create a minimal base class if DeepSeek not available
-    class GroupGEMMStrategy:
-        def __init__(self, custom_activation):
-            self.activation_function = custom_activation
+# try:
+#     from torchtitan.experiments.deepseek_v3.group_gemms import GroupGEMMStrategy
+#     DEEPSEEK_GROUP_GEMM_AVAILABLE = True
+# except ImportError:
+#     # Create a minimal base class if DeepSeek not available
+#     class GroupGEMMStrategy:
+#         def __init__(self, custom_activation):
+#             self.activation_function = custom_activation
         
-        def arrange_expert_weights(self, all_weights, submod_name, module):
-            raise NotImplementedError("Requires arrange_expert_weights method")
+#         def arrange_expert_weights(self, all_weights, submod_name, module):
+#             raise NotImplementedError("Requires arrange_expert_weights method")
         
-        def execute(self, contig_tokens, m_sizes, m_offsets, module):
-            raise NotImplementedError("GroupGEMM strategy must implement execute method")
+#         def execute(self, contig_tokens, m_sizes, m_offsets, module):
+#             raise NotImplementedError("GroupGEMM strategy must implement execute method")
         
-        @staticmethod
-        def is_available() -> bool:
-            return False
+#         @staticmethod
+#         def is_available() -> bool:
+#             return False
     
-    DEEPSEEK_GROUP_GEMM_AVAILABLE = False
+#     DEEPSEEK_GROUP_GEMM_AVAILABLE = False
+
+class GroupGEMMStrategy:
+    def __init__(self, custom_activation):
+        self.activation_function = custom_activation
+    
+    def arrange_expert_weights(self, all_weights, submod_name, module):
+        raise NotImplementedError("Requires arrange_expert_weights method")
+    
+    def execute(self, contig_tokens, m_sizes, m_offsets, module):
+        raise NotImplementedError("GroupGEMM strategy must implement execute method")
+    
+    @staticmethod
+    def is_available() -> bool:
+        return False
 
 
 class ROCmGroupGEMMStrategy(GroupGEMMStrategy):

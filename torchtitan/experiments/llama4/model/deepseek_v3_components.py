@@ -22,7 +22,7 @@ def get_expert_parallel_group():
         current_mesh = device_mesh._mesh_resources.get_current_mesh()
         if current_mesh is None:
             return None
-        return current_mesh.get_group("ep")
+        return current_mesh.get_group("dp_shard_in_ep")
     except (ImportError, AttributeError, RuntimeError):
         return None
 

@@ -4,40 +4,60 @@ import torch.nn as nn
 import torch.distributed as dist
 from torchtitan.models.moe import MoEArgs
 from torchtitan.tools.logging import logger
+from dataclasses import dataclass
 
 
-def get_expert_parallel_group(dim_name: str = "ep"):
+def get_expert_parallel_group(dim_name: str = "dp_shard_in_ep"):
     """Get expert parallel process group if available"""
-    try:
-        import torch.distributed.device_mesh as device_mesh
-        current_mesh = device_mesh._mesh_resources.get_current_mesh()
-        if current_mesh is None:
-            return None
-        return current_mesh.get_group(dim_name)
-    except (ImportError, AttributeError, RuntimeError):
+    # try:
+    #     import torch.distributed.device_mesh as device_mesh
+    #     current_mesh = device_mesh._mesh_resources.get_current_mesh()
+    #     if current_mesh is None:
+    #         return None
+    #     return current_mesh.get_group(dim_name)
+    # except (ImportError, AttributeError, RuntimeError):
+    #     return None
+    import torch.distributed.device_mesh as device_mesh
+    current_mesh = device_mesh._mesh_resources.get_current_mesh()
+    if current_mesh is None:
         return None
+    return current_mesh.get_group(dim_name)
+
+
+@dataclass
+class DeepSeekConfig:
+    hidden_size: int = 4096
+    moe_intermediate_size: int = 2048
+    n_routed_experts: int = 8
+    n_shared_experts: Optional[int] = None
+    num_experts_per_tok: int = 2
+    max_seq_len: int = 4096
+    scoring_func: str = "sigmoid"
+    norm_topk_prob: bool = False
+    routed_scaling_factor: float = 1.0
+    ep_size: int = 1
 
 
 def create_deepseek_config(moe_args: MoEArgs, dim: int, hidden_dim: int, max_seq_len: int):
     """Convert LLaMA4 MoEArgs to DeepSeek V3 compatible config"""
-    try:
-        from torchtitan.experiments.deepseek_v3.model_config import ModelArgs as DeepSeekConfig
-    except ImportError:
-        # Create minimal config if DeepSeek not available
-        from dataclasses import dataclass
+    # try:
+    #     from torchtitan.experiments.deepseek_v3.model_config import ModelArgs as DeepSeekConfig
+    # except ImportError:
+    #     # Create minimal config if DeepSeek not available
+    #     from dataclasses import dataclass
         
-        @dataclass
-        class DeepSeekConfig:
-            hidden_size: int = 4096
-            moe_intermediate_size: int = 2048
-            n_routed_experts: int = 8
-            n_shared_experts: Optional[int] = None
-            num_experts_per_tok: int = 2
-            max_seq_len: int = 4096
-            scoring_func: str = "sigmoid"
-            norm_topk_prob: bool = False
-            routed_scaling_factor: float = 1.0
-            ep_size: int = 1
+    #     @dataclass
+    #     class DeepSeekConfig:
+    #         hidden_size: int = 4096
+    #         moe_intermediate_size: int = 2048
+    #         n_routed_experts: int = 8
+    #         n_shared_experts: Optional[int] = None
+    #         num_experts_per_tok: int = 2
+    #         max_seq_len: int = 4096
+    #         scoring_func: str = "sigmoid"
+    #         norm_topk_prob: bool = False
+    #         routed_scaling_factor: float = 1.0
+    #         ep_size: int = 1
     
     config = DeepSeekConfig()
     
@@ -87,7 +107,8 @@ class LLaMA4SymmMemMoE(nn.Module):
         self.max_seq_len = max_seq_len
         
         # Determine if we should use distributed MoE
-        use_distributed = self._should_use_distributed_moe(ep_enabled)
+        # use_distributed = self._should_use_distributed_moe(ep_enabled)
+        use_distributed = True
         
         if use_distributed:
             self._init_distributed_moe()

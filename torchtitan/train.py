@@ -154,7 +154,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(
             f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
         )
-        with torch.device("meta"):
+        with torch.device("cuda"), parallel_dims.world_mesh:
             model = self.train_spec.model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty

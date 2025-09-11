@@ -193,7 +193,8 @@ def parallelize_llama(
         apply_compile(model)
 
     dp_mesh: DeviceMesh | None = None
-    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+    # if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+    if False:
         # apply FSDP or HSDP, potentially with Context Parallel
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
