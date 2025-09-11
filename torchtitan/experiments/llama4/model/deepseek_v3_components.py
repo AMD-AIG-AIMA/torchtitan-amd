@@ -230,13 +230,10 @@ class DeepSeekV3MoE(nn.Module):
         
         # Try to use grouped GEMM strategy if available
         if self.group_gemm_strategy is not None:
-            try:
-                return self._process_with_grouped_gemm(tokens, expert_indices, expert_weights)
-            except Exception as e:
-                logger.warning(f"Grouped GEMM processing failed: {e}, falling back to manual loop")
+            return self._process_with_grouped_gemm(tokens, expert_indices, expert_weights)
         
         # Fallback to manual expert loop
-        return self._process_manual_loop(tokens, expert_indices, expert_weights)
+        # return self._process_manual_loop(tokens, expert_indices, expert_weights)
 
     def _process_with_grouped_gemm(self, tokens, expert_indices, expert_weights):
         """Process tokens using grouped GEMM operations"""

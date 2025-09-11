@@ -28,7 +28,7 @@ def get_expert_parallel_group(dim_name: str = "dp_shard_in_ep"):
 class DeepSeekConfig:
     hidden_size: int = 4096
     moe_intermediate_size: int = 2048
-    n_routed_experts: int = 8
+    n_routed_experts: int = 16
     n_shared_experts: Optional[int] = None
     num_experts_per_tok: int = 2
     max_seq_len: int = 4096
@@ -64,7 +64,8 @@ def create_deepseek_config(moe_args: MoEArgs, dim: int, hidden_dim: int, max_seq
     # Map LLaMA4 parameters to DeepSeek V3
     config.hidden_size = dim
     config.moe_intermediate_size = hidden_dim
-    config.n_routed_experts = moe_args.num_experts
+    # config.n_routed_experts = moe_args.num_experts
+    config.n_routed_experts = 16
     config.n_shared_experts = moe_args.num_shared_experts if moe_args.num_shared_experts > 0 else None
     config.num_experts_per_tok = moe_args.top_k
     config.max_seq_len = max_seq_len

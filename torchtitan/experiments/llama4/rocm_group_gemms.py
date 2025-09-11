@@ -5,7 +5,7 @@ from torchtitan.tools.utils import is_hip
 
 # Import the existing ROCm function from standard MoE
 try:
-    from torchtitan.models.moe import _run_experts_grouped_mm_rocm
+    from torchtitan.models.moe import _run_experts_grouped_mm_rocm_single
     STANDARD_ROCM_AVAILABLE = True
 except ImportError:
     logger.warning("Standard ROCm grouped GEMM function not available")
@@ -114,11 +114,7 @@ class ROCmGroupGEMMStrategy(GroupGEMMStrategy):
         Returns:
             Processed tokens from all experts [total_tokens, hidden_size]
         """
-        try:
-            return self._run_rocm_grouped_gemm(contig_tokens, m_sizes, module)
-        except Exception as e:
-            logger.warning(f"ROCm grouped GEMM failed: {e}, falling back to manual loop")
-            return self._run_manual_fallback(contig_tokens, m_sizes, module)
+        return self._run_rocm_grouped_gemm(contig_tokens, m_sizes, module)
 
     def _run_rocm_grouped_gemm(self, contig_tokens, m_sizes, module):
         """
@@ -143,6 +139,9 @@ class ROCmGroupGEMMStrategy(GroupGEMMStrategy):
         w1 = module.gate_proj_weight  # [num_experts, intermediate_size, hidden_size]
         w2 = module.down_proj_weight  # [num_experts, hidden_size, intermediate_size]  
         w3 = module.up_proj_weight    # [num_experts, intermediate_size, hidden_size]
+
+        print(f"xxxxxxxxxxx ROCm grouped GEMM weights shapes: w1 {w1.shape}, w2 {w2.shape}, w3 {w3.shape}")
+        print("x222222 %s %s" % (contig_tokens.shape, m_sizes.shape))
         
         # Ensure token count compatibility
         num_tokens_per_expert = m_sizes.to(torch.int64)
@@ -155,7 +154,7 @@ class ROCmGroupGEMMStrategy(GroupGEMMStrategy):
         # Call the existing optimized ROCm function
         logger.debug(f"Running ROCm grouped GEMM: {contig_tokens.shape} tokens across {expected_experts} experts")
         
-        output = _run_experts_grouped_mm_rocm(
+        output = _run_experts_grouped_mm_rocm_single(
             w1=w1,
             w2=w2, 
             w3=w3,
@@ -251,6 +250,7 @@ class TorchGroupGEMMFallback(GroupGEMMStrategy):
             raise ValueError(f"No expert weights provided for {submod_name}")
         
         # Stack weights in the same format as ROCm
+        print(f"xxx combining {submod_name} weights for torch grouped GEMM: {[w.shape for w in all_weights]}")
         combined_weights = torch.stack(all_weights, dim=0)
         return combined_weights
 

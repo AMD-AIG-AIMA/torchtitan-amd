@@ -492,7 +492,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             pp_mesh=(
                 parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
             ),
-            ep_enabled=parallel_dims.ep_enabled,
+            # ep_enabled=parallel_dims.ep_enabled,
+            ep_enabled=False,
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()

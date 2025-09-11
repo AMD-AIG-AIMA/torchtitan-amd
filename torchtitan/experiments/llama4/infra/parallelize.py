@@ -141,43 +141,43 @@ def parallelize_llama(
     )
 
     # Enable ep_enabled for hybrid MoE layers if expert parallelism is enabled
-    if parallel_dims.ep_enabled:
-        enable_expert_parallelism_in_model(model)
+    # if parallel_dims.ep_enabled:
+    #     enable_expert_parallelism_in_model(model)
 
-    if parallel_dims.tp_enabled:
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
+    # if parallel_dims.tp_enabled:
+    #     enable_float8_linear = "float8" in job_config.model.converters
+    #     float8_is_rowwise = job_config.float8.recipe_name in (
+    #         "rowwise",
+    #         "rowwise_with_gw_hp",
+    #     )
 
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
+    #     # For now, float8 all-gather with TP is only supported for tensorwise
+    #     # float8 scaling recipes. For rowwise recipes, we use regular TP and
+    #     # all-gather happens in high precision.
+    #     enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
-        apply_non_moe_tp(
-            model,
-            world_mesh["tp"],
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-        )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+    #     apply_non_moe_tp(
+    #         model,
+    #         world_mesh["tp"],
+    #         loss_parallel=not job_config.parallelism.disable_loss_parallel,
+    #         enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+    #     )
+    #     maybe_enable_async_tp(job_config, world_mesh["tp"])
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
-        )
+    # if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    #     apply_moe_ep_tp(
+    #         model,
+    #         tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
+    #         ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
+    #         ep_tp_mesh=(
+    #             world_mesh["ep", "tp"]
+    #             if parallel_dims.tp_enabled
+    #             and parallel_dims.ep_enabled
+    #             and parallel_dims.etp_enabled
+    #             else None
+    #         ),
+    #         etp_enabled=parallel_dims.etp_enabled,
+    #     )
 
     # Setup symmetric memory after model creation and parallelism but before FSDP
     if parallel_dims.ep_enabled:

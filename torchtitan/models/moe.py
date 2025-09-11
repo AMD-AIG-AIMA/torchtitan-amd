@@ -154,6 +154,33 @@ def _run_experts_grouped_mm_rocm(
     return out
 
 
+def _run_experts_grouped_mm_rocm_single(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
+    x: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+) -> torch.Tensor:
+    assert x.dim() == 2
+
+    num_tokens_per_expert = num_tokens_per_expert.to(torch.int64)
+
+    h = F.silu(
+        turbo.ops.grouped_gemm(
+            x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+        )
+    )
+    h = h * turbo.ops.grouped_gemm(
+        x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+    )
+
+    out = turbo.ops.grouped_gemm(
+        h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
+    ).type_as(x)
+
+    return out
+
+
 class GroupedExperts(nn.Module):
     def __init__(
         self,
