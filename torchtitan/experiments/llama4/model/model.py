@@ -322,7 +322,6 @@ class TransformerBlock(nn.Module):
                 dim=dim,
                 hidden_dim=hidden_dim,
                 ep_enabled=ep_enabled,
-                max_seq_len=model_args.max_seq_len,
             )
         else:
             self.feed_forward = FeedForward(
