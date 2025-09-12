@@ -139,9 +139,6 @@ class ROCmGroupGEMMStrategy(GroupGEMMStrategy):
         w1 = module.gate_proj_weight  # [num_experts, intermediate_size, hidden_size]
         w2 = module.down_proj_weight  # [num_experts, hidden_size, intermediate_size]  
         w3 = module.up_proj_weight    # [num_experts, intermediate_size, hidden_size]
-
-        print(f"xxxxxxxxxxx ROCm grouped GEMM weights shapes: w1 {w1.shape}, w2 {w2.shape}, w3 {w3.shape}")
-        print("x222222 %s %s" % (contig_tokens.shape, m_sizes.shape))
         
         # Ensure token count compatibility
         num_tokens_per_expert = m_sizes.to(torch.int64)

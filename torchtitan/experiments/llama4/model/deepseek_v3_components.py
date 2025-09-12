@@ -6,6 +6,11 @@ import torch.distributed as dist
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import is_hip
 
+import torch.distributed._symmetric_memory as symm_mem
+from ..rocm_symm_mem_recipes import OnDeviceAllToAllV
+from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
+
+
 # Import ROCm group GEMM strategies
 try:
     from ..rocm_group_gemms import ROCmGroupGEMMStrategy, TorchGroupGEMMFallback
@@ -13,6 +18,46 @@ try:
 except ImportError:
     logger.warning("ROCm group GEMM strategies not available")
     ROCM_GROUP_GEMM_AVAILABLE = False
+
+
+class RandomSTE(torch.autograd.Function):
+    """
+    Straight-Through Estimator(STE) function that returns random values
+    with different seed for each rank.
+
+    This is used to generate random logits of router for load-balanced benchmark.
+    """
+
+    generator = None
+
+    @staticmethod
+    def forward(ctx, logits):
+        """
+        Forward pass returns random logits with rank-specific seed.
+        """
+        if RandomSTE.generator is None:
+            global_rank = torch.distributed.get_rank()
+            base_seed = 42
+            seed = base_seed + global_rank
+            RandomSTE.generator = torch.Generator(device=logits.device)
+            RandomSTE.generator.manual_seed(seed)
+
+        random_logits = logits.clone().normal_(generator=RandomSTE.generator)
+        return random_logits
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass propagates the gradient for logits.
+        """
+        return grad_output
+
+
+def apply_random_logits(logits):
+    """
+    Apply the RandomSTE function to the logits.
+    """
+    return RandomSTE.apply(logits)
 
 
 def get_expert_parallel_group():
@@ -75,6 +120,7 @@ class SimpleRouter(nn.Module):
         """
         # Compute routing scores
         logits = self.gate(x) + self.load_balance_bias.unsqueeze(0)
+        logits = apply_random_logits(logits)
         
         # Apply scoring function
         if self.scoring_func == "softmax":
@@ -133,13 +179,18 @@ class DeepSeekV3MoE(nn.Module):
     - Simple and maintainable codebase
     """
 
+    # Symmetric memory buffers shared by all MoE instances across layers
+    token_send_buf: Optional[torch.Tensor] = None
+    token_gather_buf: Optional[torch.Tensor] = None
+
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
         self.num_experts = config.n_routed_experts
-        self.top_k = config.num_experts_per_tok
+        # self.top_k = config.num_experts_per_tok
+        self.top_k = 2
 
         # Setup expert parallelism
         self._setup_expert_parallelism()
@@ -192,6 +243,51 @@ class DeepSeekV3MoE(nn.Module):
             expert = SimpleMLP(self.hidden_size, self.intermediate_size)
             self.experts.append(expert)
 
+    def sort_tokens(self, x, topk_ids, topk_weights):
+        # This part sorts the token indices so that tokens routed to the same expert reside consecutively.
+        # An implication is that tokens to the same "expert group" (i.e., device) are also consecutive.
+        # Since this is an "aritificial" index creation (final outcome being
+        # `idxs`), we don't need gradients here.
+
+        with torch.no_grad():
+            # [seq_len, n_routed_experts]
+            expert_counts = topk_ids.new_zeros(
+                (topk_ids.shape[0], self.config.n_routed_experts)
+            )
+            # Fill 1 to the selected experts
+            expert_counts.scatter_(1, topk_ids, 1)
+            tokens_per_expert = expert_counts.sum(dim=0)
+            # Token indices for each expert
+            token_indices = topk_ids.view(-1).argsort()
+
+        sorted_tokens = x[token_indices // topk_ids.shape[1]]
+        # assert sorted_tokens.shape == sorted_tokens_shape
+
+        return (sorted_tokens, token_indices, tokens_per_expert)
+
+    def get_send_buf(self):
+        # [Why detach?] During a first forward-backward step, the buffer would
+        # be included in a computational graph. In a second step, autograd will
+        # return an error saying "Trying to backward through the graph a second
+        # time (or directly access saved tensors more than once)". This is
+        # because the buffer is still in the graph, and autograd is trying to
+        # backward through the graph a second time. To avoid this, we detach the
+        # buffer from the graph. `detach()` returns a new tensor, which shares
+        # the same storage with the original one.
+        self.token_send_buf.grad = None
+        return self.token_send_buf.detach()
+
+    def get_gather_buf(self):
+        # See [Why detach?] in `get_send_buf`
+        self.token_gather_buf.grad = None
+        return self.token_gather_buf.detach()
+
+    def _run_group_gemm(self, contig_tokens, m_sizes, m_offsets):
+        """Run the appropriate group GEMM implementation based on configuration"""
+        return self.group_gemm_strategy.execute(
+                contig_tokens, m_sizes, m_offsets, self
+        )
+
     def forward(self, x):
         """
         Forward pass through MoE layer.
@@ -207,92 +303,97 @@ class DeepSeekV3MoE(nn.Module):
         x = x.view(-1, hidden_size)  # [batch_size * seq_len, hidden_size]
 
         # Route tokens to experts
-        expert_indices, expert_weights = self.router(x)
+        topk_ids, topk_weight = self.router(x)
 
-        # Process tokens through experts
-        if self.distributed_experts:
-            # Distributed processing (simplified version)
-            expert_output = self._process_distributed(x, expert_indices, expert_weights)
-        else:
-            # Local processing
-            expert_output = self._process_local(x, expert_indices, expert_weights)
+        (
+            sorted_tokens,
+            token_indices,
+            tokens_per_expert,
+        ) = self.sort_tokens(x, topk_ids, topk_weight)
 
-        expert_output = expert_output.view(batch_size, seq_len, hidden_size)
+        # keep the seqlen dimension for later use without holding onto the sorted tokens
+        seqlen_sorted_tokens = sorted_tokens.shape[0]
+
+        # This part exchange the information about the number of tokens send and
+        # received by each expert. We can understand this information as "side
+        # band", which is not part of the actual data. Thus no gradient is
+        # needed.
+
+        # Sum the tokens over local experts, then we get tokens per EP rank,
+        # which is the input splits
+        with torch.no_grad():
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                tokens_per_expert_group, tokens_per_expert, group=self.ep_group
+            )
+            input_splits = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+
+        # Move input to the `token_send_buf` symm mem
+        token_send_buf = self.get_send_buf()
+        token_send_buf[: token_indices.shape[0]].copy_(sorted_tokens)
+        # Note: `out=` avoids copy, but it is not differentiable
+        # torch.index_select(x, 0, idxs // topk_ids.shape[1], out=token_send_buf[: idxs.shape[0]])
+        token_gather_buf, output_splits = OnDeviceAllToAllV.apply(
+            token_send_buf,
+            input_splits,
+            self.ep_group,
+        )
+
+        # We need to permute the received tokens so that tokens for the same expert are contiguous.
+        # This part prepares a 1D tensor `permuted_indices` for such permutation.
+        # This part doesn't need gradient.
+        with torch.no_grad():
+            permuted_indices, m_sizes, m_offsets = generate_permute_indices(
+                tokens_per_expert_group,
+                self.experts_per_rank,
+                self.ep_size,
+                token_gather_buf.shape[0],
+                128,
+            )
+
+        # Permute the received tokens so that tokens for the same expert are contiguous.
+        contig_tokens = token_gather_buf[permuted_indices]
+
+        # group gemm - handle all three group gemms (up, gate, down for all experts)
+        hidden_outputs = self._run_group_gemm(
+            contig_tokens,
+            m_sizes,
+            m_offsets,
+        )
+
+        # Prepare buffer for tokens processed by experts
+        processed_tokens = self.get_gather_buf()
+
+        # Move into Symmetric Memory for the return shuffle
+        processed_tokens[permuted_indices] = hidden_outputs
+
+        # Now shuffle the tokens back to their original owner, i.e. EP to DP shuffle.
+        # The input/output splits are just a reverse of the previous shuffle.
+        token_return_buf, _ = OnDeviceAllToAllV.apply(
+            processed_tokens,
+            output_splits,
+            self.ep_group,
+        )
+
+        returned_tokens = token_return_buf[:seqlen_sorted_tokens]
+        output_tokens = torch.empty_like(returned_tokens)
+        output_tokens[token_indices] = returned_tokens
+
+        final_out = (
+            output_tokens.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(returned_tokens.dtype)
+        )
 
         # Add shared expert contribution
         if self.shared_experts is not None:
-            expert_output = expert_output + self.shared_experts(identity)
+            final_out = final_out + self.shared_experts(identity)
 
-        return expert_output
-
-    def _process_local(self, tokens, expert_indices, expert_weights):
-        """Process tokens through local experts using optimized grouped operations when available"""
-        
-        # Try to use grouped GEMM strategy if available
-        if self.group_gemm_strategy is not None:
-            return self._process_with_grouped_gemm(tokens, expert_indices, expert_weights)
-        
-        # Fallback to manual expert loop
-        # return self._process_manual_loop(tokens, expert_indices, expert_weights)
-
-    def _process_with_grouped_gemm(self, tokens, expert_indices, expert_weights):
-        """Process tokens using grouped GEMM operations"""
-        
-        # Arrange tokens and compute group sizes for each expert
-        expert_tokens_list = []
-        expert_weights_gathered = []
-        m_sizes = []
-        
-        for expert_idx in range(len(self.experts)):
-            # Find tokens assigned to this expert
-            mask = (expert_indices == expert_idx)
-            expert_token_mask = mask.any(dim=1)
-            
-            if expert_token_mask.any():
-                expert_tokens = tokens[expert_token_mask]
-                expert_tokens_list.append(expert_tokens)
-                m_sizes.append(expert_tokens.shape[0])
-                expert_weights_gathered.append(expert_weights[expert_token_mask])
-            else:
-                m_sizes.append(0)
-        
-        if not expert_tokens_list:
-            return torch.zeros_like(tokens)
-        
-        # Concatenate all tokens contiguously
-        contig_tokens = torch.cat(expert_tokens_list, dim=0)
-        m_sizes_tensor = torch.tensor(m_sizes, device=tokens.device, dtype=torch.int32)
-        
-        # Arrange expert weights for grouped operations
-        module_mock = self._create_module_mock()
-        
-        # Process using the grouped GEMM strategy
-        processed_tokens = self.group_gemm_strategy.execute(
-            contig_tokens, m_sizes_tensor, None, module_mock
-        )
-        
-        # Redistribute processed tokens back to original positions
-        output = torch.zeros_like(tokens)
-        offset = 0
-        expert_idx = 0
-        
-        for i, num_tokens in enumerate(m_sizes):
-            if num_tokens > 0:
-                expert_output = processed_tokens[offset:offset + num_tokens]
-                
-                # Find original positions for this expert
-                mask = (expert_indices == i)
-                expert_token_mask = mask.any(dim=1)
-                
-                # Apply routing weights
-                routing_weights = expert_weights_gathered[expert_idx].mean(dim=-1, keepdim=True)
-                weighted_output = expert_output * routing_weights
-                
-                output[expert_token_mask] += weighted_output
-                offset += num_tokens
-                expert_idx += 1
-        
-        return output
+        return final_out
 
     def _create_module_mock(self):
         """Create a mock module with arranged expert weights for grouped GEMM"""
@@ -306,50 +407,10 @@ class DeepSeekV3MoE(nn.Module):
             up_weights.append(expert.up_proj.weight)  
             down_weights.append(expert.down_proj.weight)
         
-        # Arrange weights using the group GEMM strategy
-        class MockModule:
-            pass
+        self.gate_proj_weight = self.group_gemm_strategy.arrange_expert_weights(gate_weights, "gate_proj", self)
+        self.up_proj_weight = self.group_gemm_strategy.arrange_expert_weights(up_weights, "up_proj", self)
+        self.down_proj_weight = self.group_gemm_strategy.arrange_expert_weights(down_weights, "down_proj", self)
         
-        module = MockModule()
-        module.gate_proj_weight = self.group_gemm_strategy.arrange_expert_weights(gate_weights, "gate_proj", module)
-        module.up_proj_weight = self.group_gemm_strategy.arrange_expert_weights(up_weights, "up_proj", module)
-        module.down_proj_weight = self.group_gemm_strategy.arrange_expert_weights(down_weights, "down_proj", module)
-        
-        return module
-
-    def _process_manual_loop(self, tokens, expert_indices, expert_weights):
-        """Fallback manual loop processing"""
-        output = torch.zeros_like(tokens)
-
-        for expert_idx, expert in enumerate(self.experts):
-            # Find tokens assigned to this expert
-            mask = (expert_indices == expert_idx)
-            if not mask.any():
-                continue
-
-            # Get tokens and weights for this expert
-            expert_token_mask = mask.any(dim=1)
-            expert_tokens = tokens[expert_token_mask]
-            if expert_tokens.numel() == 0:
-                continue
-
-            # Process through expert
-            expert_out = expert(expert_tokens)
-
-            # Apply routing weights and accumulate
-            weights = expert_weights[mask].mean(dim=-1, keepdim=True)
-            weighted_out = expert_out * weights
-
-            output[expert_token_mask] += weighted_out
-
-        return output
-
-    def _process_distributed(self, tokens, expert_indices, expert_weights):
-        """Process tokens through distributed experts (simplified)"""
-        # For now, fall back to local processing
-        # Full distributed implementation would require token shuffling
-        logger.debug("Distributed expert processing not fully implemented, using local fallback")
-        return self._process_local(tokens, expert_indices, expert_weights)
 
     def setup_symm_mem(self, dtype: torch.dtype, device: torch.device):
         """Setup symmetric memory for distributed processing"""
@@ -357,50 +418,30 @@ class DeepSeekV3MoE(nn.Module):
             logger.info("Symmetric memory not needed for single-node setup")
             return
 
-        try:
-            # Import symmetric memory components
-            import torch.distributed._symmetric_memory as symm_mem
-            
-            # Try ROCm-compatible symmetric memory first
-            if is_hip():
-                try:
-                    from ..rocm_symm_mem_recipes import ROCmOnDeviceAllToAllV as OnDeviceAllToAllV
-                    logger.info("Using ROCm-compatible symmetric memory implementation")
-                except ImportError:
-                    logger.warning("ROCm symmetric memory not available, falling back to standard implementation")
-                    from torchtitan.experiments.deepseek_v3.symm_mem_recipes import OnDeviceAllToAllV
-            else:
-                from torchtitan.experiments.deepseek_v3.symm_mem_recipes import OnDeviceAllToAllV
+        # Setup parameters
+        overflow_factor = 2
+        max_tokens = self.config.max_seq_len * self.top_k * overflow_factor
 
-            # Setup parameters
-            overflow_factor = 2
-            max_tokens = self.config.max_seq_len * self.top_k * overflow_factor
+        self._create_module_mock()
+        # Set max output length
+        OnDeviceAllToAllV.max_output_len = max_tokens
 
-            # Set max output length
-            OnDeviceAllToAllV.max_output_len = max_tokens
+        # Create symmetric memory buffers (class-level, shared across instances)
+        if not hasattr(DeepSeekV3MoE, '_symm_buffers_initialized'):
+            DeepSeekV3MoE.token_send_buf = symm_mem.empty(
+                self.config.max_seq_len * self.top_k,
+                self.hidden_size,
+                dtype=dtype,
+                device=device,
+            )
 
-            # Create symmetric memory buffers (class-level, shared across instances)
-            if not hasattr(DeepSeekV3MoE, '_symm_buffers_initialized'):
-                DeepSeekV3MoE.token_send_buf = symm_mem.empty(
-                    self.config.max_seq_len * self.top_k,
-                    self.hidden_size,
-                    dtype=dtype,
-                    device=device,
-                )
+            DeepSeekV3MoE.token_gather_buf = symm_mem.empty(
+                max_tokens,
+                self.hidden_size,
+                dtype=dtype,
+                device=device,
+            )
 
-                DeepSeekV3MoE.token_gather_buf = symm_mem.empty(
-                    max_tokens,
-                    self.hidden_size,
-                    dtype=dtype,
-                    device=device,
-                )
+            DeepSeekV3MoE._symm_buffers_initialized = True
 
-                DeepSeekV3MoE._symm_buffers_initialized = True
-
-            logger.info("Symmetric memory setup completed")
-
-        except ImportError as e:
-            logger.warning(f"Symmetric memory components not available: {e}")
-        except Exception as e:
-            logger.warning(f"Failed to setup symmetric memory: {e}")
-            logger.warning("Continuing without symmetric memory optimization")
+        logger.info("Symmetric memory setup completed")

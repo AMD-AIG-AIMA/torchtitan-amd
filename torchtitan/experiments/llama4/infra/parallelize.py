@@ -94,12 +94,9 @@ def setup_symmetric_memory_for_model(model: nn.Module, job_config: JobConfig):
     moe_layers_configured = 0
     for layer_name, layer in model.layers.items():
         if hasattr(layer, 'moe') and hasattr(layer.moe, 'setup_symmetric_memory'):
-            try:
-                logger.info(f"Setting up symmetric memory for layer {layer_name}")
-                layer.moe.setup_symmetric_memory(dtype, device)
-                moe_layers_configured += 1
-            except Exception as e:
-                logger.warning(f"Failed to setup symmetric memory for layer {layer_name}: {e}")
+            logger.info(f"Setting up symmetric memory for layer {layer_name}")
+            layer.moe.setup_symmetric_memory(dtype, device)
+            moe_layers_configured += 1
     
     if moe_layers_configured > 0:
         logger.info(f"Configured symmetric memory for {moe_layers_configured} MoE layers")

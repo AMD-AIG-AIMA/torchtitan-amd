@@ -175,21 +175,9 @@ class LLaMA4SymmMemMoE(nn.Module):
         return self.moe_impl(x)
     
     def setup_symmetric_memory(self, dtype: torch.dtype, device: torch.device):
-        """Setup symmetric memory buffers if supported"""
-        if not self.symmetric_memory_enabled:
-            logger.debug("Symmetric memory not enabled")
-            return
-        
-        if not hasattr(self.moe_impl, 'setup_symm_mem'):
-            logger.warning("MoE implementation does not support symmetric memory")
-            return
-        
-        try:
-            logger.info("Setting up symmetric memory for MoE")
-            self.moe_impl.setup_symm_mem(dtype, device)
-        except Exception as e:
-            logger.warning(f"Failed to setup symmetric memory: {e}")
-            logger.warning("MoE will continue with standard all-to-all communication")
+        logger.info("Setting up symmetric memory for MoE")
+        logger.info("Implementation type: %s %s" % (self.implementation_type, type(self.moe_impl)))
+        self.moe_impl.setup_symm_mem(dtype, device)
     
     def init_weights(self, init_std: float, buffer_device: torch.device):
         """Initialize MoE weights"""
