@@ -8,13 +8,15 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torchtitan.tools.utils import is_hip
 
 from torchtitan.models.attention import build_attention
 from torchtitan.models.moe import MoE
 from torchtitan.protocols import ModelProtocol
 
 from .args import TransformerModelArgs
-
+if is_hip():
+    import primus_turbo.pytorch as turbo
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     """
@@ -154,10 +156,13 @@ class Attention(nn.Module):
         # are computed during the model initialization and each layer has its own
         # values of these two variables.
         self.use_rope = use_rope
-
-        self.sdpa = build_attention(
-            model_args.use_flex_attn, model_args.attn_mask_type, fixed_block_size
-        )
+        if is_hip():
+            self.sdpa = turbo.modules.TurboAttention(causal=True)
+        else:
+            self.sdpa = build_attention(
+                model_args.use_flex_attn, model_args.attn_mask_type, fixed_block_size
+            )
+        
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -194,19 +199,23 @@ class Attention(nn.Module):
         if self.use_rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
+        if is_hip():    
+            output = self.sdpa(xq, xk, xv)
+        else:
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+            values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        output = self.sdpa(xq, xk, xv)
+            output = self.sdpa(xq, xk, xv)
 
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+            output = output.transpose(
+                1, 2
+            ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 

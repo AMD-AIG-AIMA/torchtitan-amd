@@ -21,7 +21,7 @@ enable_wandb = false
 name = "deepseek_v3"
 flavor = "16B"
 hf_assets_path = "./assets/hf/deepseek-moe-16b-base"
-# converters = ["float8"]
+converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
