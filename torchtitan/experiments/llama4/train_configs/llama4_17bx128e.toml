@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 name = "llama4"
 flavor = "17bx128e"
 hf_assets_path = "./assets/hf/Llama-4-Scout-17B-128E"
-# converters = ["float8"]
+converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
