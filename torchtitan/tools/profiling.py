@@ -35,9 +35,13 @@ def maybe_enable_profiling(
     if enable_profiling:
         trace_dir = os.path.join(base_folder, profiling_config.save_traces_folder)
         profile_freq = profiling_config.profile_freq
+        profile_with_stack = profiling_config.profile_with_stack
 
         rank = torch.distributed.get_rank()
-
+        if rank not in profiling_config.profile_ranks:
+            torch_profiler = contextlib.nullcontext()
+            yield None # only profile the specified ranks
+        
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
             curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name, leaf_folder)
@@ -75,6 +79,7 @@ def maybe_enable_profiling(
             ],
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
+            with_stack=profile_with_stack,
             record_shapes=True,
         ) as torch_profiler:
             torch_profiler.step_num = global_step

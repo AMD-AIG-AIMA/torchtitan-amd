@@ -7,7 +7,9 @@ description = "Llama 4 Scout 17Bx16E training"
 [profiling]
 enable_profiling = false
 save_traces_folder = "profile_trace"
-profile_freq = 100
+profile_freq = 19
+profile_ranks = [0]       # profile rank0 only 
+profile_with_stack = true # keep call stack in profiled trace
 
 [metrics]
 log_freq = 1
@@ -26,14 +28,14 @@ lr = 4e-3
 eps = 1e-15
 
 [lr_scheduler]
-warmup_steps = 600
+warmup_steps = 2
 min_lr_factor = 0.1
 
 [training]
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 3000
+steps = 20
 dataset = "c4"
 
 [parallelism]
@@ -58,7 +60,7 @@ async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 mode = "full" # ["none", "selective", "full"]
 
 [compile]
-enable=false
+enable=true
 components = ["model", "loss"]
 
 [float8]

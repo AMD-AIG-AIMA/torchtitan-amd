@@ -43,6 +43,12 @@ class Profiling:
     save_memory_snapshot_folder: str = "memory_snapshot"
     """Memory snapshot files location"""
 
+    profile_ranks: list[int] = field(default_factory=lambda: [0])
+    """List of ranks to profile, others will skip profiling"""
+
+    profile_with_stack: bool = False
+    """Whether to enable stack tracing in profiler"""
+
 
 @dataclass
 class Metrics:
