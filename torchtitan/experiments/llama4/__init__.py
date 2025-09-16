@@ -41,8 +41,9 @@ llama4_configs = {
         multiple_of=2048,
         rope_theta=500000,
         max_seq_len=10485760,
-        moe_args=MoEArgs(num_experts=16),
+        moe_args=MoEArgs(num_experts=16,force_uniform_routing=True),
         interleave_moe_layer_step=1,
+        
     ),
     "17bx128e": TransformerModelArgs(
         dim=5120,
@@ -52,7 +53,7 @@ llama4_configs = {
         ffn_dim_multiplier=1.2,
         multiple_of=2048,
         rope_theta=500000,
-        moe_args=MoEArgs(num_experts=128),
+        moe_args=MoEArgs(num_experts=128,force_uniform_routing=True),
     ),
     "debugmodel_irope": TransformerModelArgs(
         dim=256,

@@ -39,6 +39,9 @@ class MoEArgs:
     top_k: int = 1
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
+    
+    # New option for forced uniform distribution
+    force_uniform_routing: bool = False
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -245,6 +248,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        force_uniform_routing: bool = False,
     ):
         super().__init__()
         self.gate = nn.Linear(dim, num_experts, bias=False)
@@ -253,6 +257,11 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.force_uniform_routing = force_uniform_routing
+        
+        # Counter for uniform routing
+        if self.force_uniform_routing:
+            self.register_buffer("routing_counter", torch.tensor(0, dtype=torch.long))
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
@@ -274,6 +283,27 @@ class TokenChoiceTopKRouter(nn.Module):
         """
         # scores shape (bs*slen, num_experts)
         scores = self.gate(x)
+        
+        # Handle forced uniform routing
+        if self.force_uniform_routing:
+            batch_size = x.shape[0]
+            # Create round-robin expert assignments for uniform distribution [0, 1, 2, ..., num_experts-1]
+            expert_indices = (self.routing_counter + torch.arange(batch_size, device=x.device)) % self.num_experts
+            self.routing_counter += batch_size
+            
+            # Create one-hot scores for selected experts
+            selected_experts_indices = expert_indices.unsqueeze(1)  # shape (bs, 1)
+            top_scores = torch.ones(batch_size, self.top_k, device=x.device, dtype=scores.dtype)
+            
+            # Count tokens per expert
+            num_tokens_per_expert = torch.histc(
+                selected_experts_indices.view(-1).float(),
+                bins=self.num_experts,
+                min=0,
+                max=self.num_experts - 1,
+            )
+            
+            return top_scores, selected_experts_indices, num_tokens_per_expert
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
@@ -394,6 +424,7 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            force_uniform_routing=moe_args.force_uniform_routing,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
         self.shared_experts = (
