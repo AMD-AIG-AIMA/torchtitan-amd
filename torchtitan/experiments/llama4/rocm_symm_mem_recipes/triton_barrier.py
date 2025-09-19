@@ -157,3 +157,21 @@ def blockwise_barrier(
     if flat_tid < world_size:
         send_signal(send_addrs, sem)
         wait_signal(wait_addrs, sem)
+
+
+@triton.jit
+def barrier_all_ipc(rank, num_ranks, signal_pad_ptrs):
+    # tid = thread_idx(axis=0)  # noqa: F841
+    signal_pad_ptrs = signal_pad_ptrs.to(tl.pointer_type(tl.uint64))
+    for i in range(num_ranks):
+        remote_base_ptr = tl.load(signal_pad_ptrs + i).to(tl.pointer_type(tl.int32))
+        # tl.device_print("remote_base_ptr", remote_base_ptr)
+        while tl.atomic_cas(remote_base_ptr + rank, 0, 1, scope="sys", sem="release") != 0:
+            pass
+
+    for i in range(num_ranks):
+        local_base_ptr = tl.load(signal_pad_ptrs + rank).to(tl.pointer_type(tl.int32))
+        while tl.atomic_cas(local_base_ptr + i, 1, 0, scope="sys", sem="acquire") != 1:
+            pass
+
+    tl.debug_barrier()

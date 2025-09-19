@@ -399,8 +399,11 @@ class DeepSeekV3MoE(nn.Module):
                 128,
             )
 
+        permuted_indices = permuted_indices.narrow(0, 0, m_offsets[-1])
         # Permute the received tokens so that tokens for the same expert are contiguous.
         contig_tokens = token_gather_buf[permuted_indices]
+
+        logger.info(f"Permuting {token_gather_buf.shape} with {permuted_indices.shape}, resulting {contig_tokens.shape}")
 
         # group gemm - handle all three group gemms (up, gate, down for all experts)
         hidden_outputs = self._run_group_gemm(
