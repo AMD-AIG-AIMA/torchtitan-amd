@@ -17,6 +17,12 @@ from torchtitan.protocols import ModelProtocol
 from .args import TransformerModelArgs
 if is_hip():
     import primus_turbo.pytorch as turbo
+    # from primus_turbo.pytorch.ops import gemm_fp8_tensorwise,gemm_fp8_blockwise
+    from primus_turbo.pytorch.core.float8 import (
+        Float8QuantConfig,
+        Format,
+        ScalingGranularity,
+    )
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     """
@@ -135,6 +141,7 @@ class Attention(nn.Module):
     ):
         super().__init__()
         self.n_heads = model_args.n_heads
+        self.use_turbo_fp8_gemm = model_args.use_turbo_fp8_gemm
         self.n_kv_heads = (
             model_args.n_heads
             if model_args.n_kv_heads is None
@@ -187,14 +194,31 @@ class Attention(nn.Module):
         """
 
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        if is_hip() and self.use_turbo_fp8_gemm:
+            fp8_cfg = Float8QuantConfig(
+                format=Format.E4M3,
+                granularity=ScalingGranularity.TENSORWISE,  # or ROWWISE
+            )
+            # Reshape input from 3D (bs, seqlen, dim) to 2D (bs*seqlen, dim) for gemm_fp8
+            x_2d = x.view(-1, x.size(-1))
+            
+            xq_2d = turbo.ops.gemm_fp8(x_2d, self.wq.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            xk_2d = turbo.ops.gemm_fp8(x_2d, self.wk.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            xv_2d = turbo.ops.gemm_fp8(x_2d, self.wv.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            
+            # Reshape back to 4D (bs, seqlen, n_heads, head_dim) directly
+            xq = xq_2d.view(bs, seqlen, -1, self.head_dim)
+            xk = xk_2d.view(bs, seqlen, -1, self.head_dim)
+            xv = xv_2d.view(bs, seqlen, -1, self.head_dim)
+        else:
+            xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
-        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
-        # local heads from sizes of xq, xk, and xv as TP may have sharded them
-        # after the above linear ops.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+            # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
+            # local heads from sizes of xq, xk, and xv as TP may have sharded them
+            # after the above linear ops.
+            xq = xq.view(bs, seqlen, -1, self.head_dim)
+            xk = xk.view(bs, seqlen, -1, self.head_dim)
+            xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         if self.use_rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
@@ -217,7 +241,21 @@ class Attention(nn.Module):
             ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         
         output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+
+        if is_hip() and self.use_turbo_fp8_gemm:
+            fp8_cfg = Float8QuantConfig(
+                format=Format.E4M3,
+                granularity=ScalingGranularity.TENSORWISE,
+            )
+            # Reshape output from 3D (bs, seqlen, dim) to 2D (bs*seqlen, dim) for gemm_fp8
+            output_2d = output.view(-1, output.size(-1))
+            result_2d = turbo.ops.gemm_fp8(output_2d, self.wo.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            # Reshape back to 3D (bs, seqlen, dim)
+            result = result_2d.view(bs, seqlen, -1)
+        else:
+            result = self.wo(output)
+       
+        return result
 
 
 class FeedForward(nn.Module):
@@ -243,8 +281,10 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: float | None,
+        use_turbo_fp8_gemm: bool = False,
     ):
         super().__init__()
+        self.use_turbo_fp8_gemm = use_turbo_fp8_gemm
         hidden_dim = int(2 * hidden_dim / 3)
         # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
@@ -256,7 +296,22 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        if is_hip() and self.use_turbo_fp8_gemm:
+            fp8_cfg = Float8QuantConfig(
+                format=Format.E4M3,
+                granularity=ScalingGranularity.TENSORWISE,
+            )
+            
+            # SwiGLU: w2(silu(w1(x)) * w3(x))
+            # x is already 2D here, no need to reshape
+            w1_output = turbo.ops.gemm_fp8(x, self.w1.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            w1_activated = F.silu(w1_output)
+            w3_output = turbo.ops.gemm_fp8(x, self.w3.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            gated = w1_activated * w3_output
+            output = turbo.ops.gemm_fp8(gated, self.w2.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            return output
+        else:
+            return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
@@ -330,6 +385,7 @@ class TransformerBlock(nn.Module):
                 hidden_dim=4 * model_args.dim,
                 multiple_of=model_args.multiple_of,
                 ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+                use_turbo_fp8_gemm=model_args.use_turbo_fp8_gemm,
             )
 
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)

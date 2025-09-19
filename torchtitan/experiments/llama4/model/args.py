@@ -51,6 +51,9 @@ class TransformerModelArgs(BaseModelArgs):
     auto_scale_hidden_dim: bool = True
     # frequency of using MoE layer instead of feedforward layer in a transformer block
     interleave_moe_layer_step: int = 2
+    
+    # Turbo FP8 GEMM
+    use_turbo_fp8_gemm: bool = False
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -70,6 +73,13 @@ class TransformerModelArgs(BaseModelArgs):
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."
             )
+        
+        # get the use_turbo_fp8_gemm from the job_config
+        self.use_turbo_fp8_gemm = job_config.model.use_turbo_fp8_gemm
+
+        logger.info(f"Setting MoE use_turbo_fp8_gemm to: {self.use_turbo_fp8_gemm}")
+        # pass the use_turbo_fp8_gemm to the moe_args   
+        self.moe_args.use_turbo_fp8_gemm = self.use_turbo_fp8_gemm
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int

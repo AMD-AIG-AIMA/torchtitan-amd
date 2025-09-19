@@ -103,6 +103,9 @@ class Model:
     which can be found here: https://github.com/pytorch/ao
     """
 
+    use_turbo_fp8_gemm: bool = False
+    """Whether to use Turbo FP8 GEMM"""
+
     print_after_conversion: bool = False
     """
     If true, model definition will be printed to stdout after all model

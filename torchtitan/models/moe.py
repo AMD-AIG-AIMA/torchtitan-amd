@@ -14,14 +14,17 @@ from torch import nn
 from torchtitan.distributed.expert_parallel import expert_parallel
 
 from torchtitan.tools.utils import is_hip
-import primus_turbo.pytorch as turbo
-from primus_turbo.pytorch.core.float8 import (
-    Float8QuantConfig,
-    Format,
-    ScalingGranularity,
-)
+if is_hip():
+    import primus_turbo.pytorch as turbo
 
-from primus_turbo.pytorch.ops import grouped_gemm_fp8, grouped_gemm_fp8_blockwise
+    # from primus_turbo.pytorch.ops import gemm_fp8_tensorwise,gemm_fp8_blockwise
+    from primus_turbo.pytorch.core.float8 import (
+        Float8QuantConfig,
+        Format,
+        ScalingGranularity,
+    )
+
+    from primus_turbo.pytorch.ops import grouped_gemm_fp8, grouped_gemm_fp8_blockwise
 
 
 @dataclass
@@ -42,6 +45,9 @@ class MoEArgs:
     
     # New option for forced uniform distribution
     force_uniform_routing: bool = False
+    
+    # Turbo FP8 GEMM
+    use_turbo_fp8_gemm: bool = False
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -61,14 +67,35 @@ class FeedForward(nn.Module):
         self,
         dim: int,
         hidden_dim: int,
+        use_turbo_fp8_gemm: bool = False,
     ):
         super().__init__()
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
+        self.use_turbo_fp8_gemm = use_turbo_fp8_gemm
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        if is_hip() and self.use_turbo_fp8_gemm:
+            fp8_cfg = Float8QuantConfig(
+                format=Format.E4M3,
+                granularity=ScalingGranularity.TENSORWISE,  # or ROWWISE
+            )
+            
+            # SwiGLU: w2(silu(w1(x)) * w3(x))
+            w1_output = turbo.ops.gemm_fp8(x, self.w1.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            w1_activated = F.silu(w1_output)
+            w3_output = turbo.ops.gemm_fp8(x, self.w3.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)  # Note: here use original input x
+            
+            # Gate: w1_activated * w3_output
+            gated = w1_activated * w3_output
+            
+            # Final projection
+            output = turbo.ops.gemm_fp8(gated, self.w2.weight, trans_a=False, trans_b=True, out_dtype=torch.bfloat16, config=fp8_cfg)
+            
+            return output
+        else:
+            return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float = 0.02):
         nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
@@ -428,7 +455,11 @@ class MoE(nn.Module):
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
         self.shared_experts = (
-            FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts)
+            FeedForward(
+                dim=dim, 
+                hidden_dim=hidden_dim * moe_args.num_shared_experts,
+                use_turbo_fp8_gemm=moe_args.use_turbo_fp8_gemm
+            )
             if moe_args.num_shared_experts > 0
             else None
         )
