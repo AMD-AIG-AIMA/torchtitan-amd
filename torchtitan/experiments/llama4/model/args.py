@@ -78,8 +78,12 @@ class TransformerModelArgs(BaseModelArgs):
         self.use_turbo_fp8_gemm = job_config.model.use_turbo_fp8_gemm
 
         logger.info(f"Setting MoE use_turbo_fp8_gemm to: {self.use_turbo_fp8_gemm}")
+        
         # pass the use_turbo_fp8_gemm to the moe_args   
         self.moe_args.use_turbo_fp8_gemm = self.use_turbo_fp8_gemm
+        
+        # pass the force_uniform_routing to the moe_args
+        self.moe_args.force_uniform_routing = job_config.model.force_uniform_routing
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
